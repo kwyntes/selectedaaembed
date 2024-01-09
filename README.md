@@ -10,19 +10,18 @@ right path for the ADB executable.
 
 Modify the `ANDROID_MUSIC_DIR` and `ADB_EXE` to point to the right places, then execute
 
-```cmd
-> python3 selectedaaembed.py [--skip-copy]
+```
+> python3 selectedaaembed.py [--incremental]
 ```
 
 and that's it. The script will copy the chosen music folder and the selected_aa
 folder from your phone to this computer, and try to embed all chosen album art
 into the files.
 
-You can use `--skip-copy` to run the script without copying anything from your
+~~You can use `--skip-copy` to run the script without copying anything from your
 phone. I added this for debugging purposes, but it might be useful in case
 you've already got the files copied from your phone previously, or don't have
-ADB installed and want to copy the files manually.
-
+ADB installed and want to copy the files manually.~~
 
 ### Prerequisites
 
@@ -35,5 +34,14 @@ ADB installed and want to copy the files manually.
 
 ### TODO
 
-- Optionally rename music files as well;
-- Copy files into a folder labelled with a date/timestamp for versioning.
+- [ ] Optionally rename music files as well;
+- [x] Copy files into a folder labelled with a date/timestamp for versioning;
+- [x] Incremental copy.
+  > because this program also modifies the files, we will need to store the
+  > timestamps from android in a seperate file (.android_files)
+
+~~**Note: because incremental copy uses a seperate file to store what files have
+been pulled previously, it will not be able to recover from any errors or manual
+termination.**~~
+sort of fixed by removing files that failed to be pulled from the list and only
+writing the list to a file *after* all the full procedure has finished.

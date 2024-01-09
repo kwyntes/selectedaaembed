@@ -13,6 +13,7 @@
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -34,6 +35,8 @@ ANDROID_MUSIC_DIR = 'sdcard/Actual Music'
 ADB_EXE = os.path.join(os.getenv('LOCALAPPDATA'),
                        'Android/Sdk/platform-tools/adb.exe')
 
+# make sure this will always produce a valid directory name!
+DATEFORMAT = '%d-%m-%Y, %Hh%Mm%Ss'
 
 ### script ###
 
@@ -48,7 +51,18 @@ script_start_time = time.time()
 
 # copy folders from android
 
-def adb_pull(android_path: str, local_path: str, sl: statuslabel):
+version_dir = datetime.now().strftime(DATEFORMAT)
+
+
+def lookup_mtime(fpath: str, filelist: list[str]) -> float:
+    # linear search should be fine
+    for ffmt in filelist:
+        if ffmt.split('|', 1)[1] == fpath:
+            return float(ffmt.split('|', 1)[0])
+    return -1
+
+
+def adb_pull(android_path: str, local_path: str, sl: statuslabel, incremental: bool) -> bool:
     """
     pulls a directory from android to the local machine, skipping files that could
     not be pulled.
@@ -59,7 +73,9 @@ def adb_pull(android_path: str, local_path: str, sl: statuslabel):
 
     try:
         android_files = subprocess.check_output(
-            [ADB_EXE, 'exec-out', f'find "{android_path}" -type f'], stderr=subprocess.STDOUT).decode('utf-8').splitlines()
+            # printf: <last modified epoch>|<fpath>
+            # will break when filenames contain newlines but that's just ridiculous
+            [ADB_EXE, 'exec-out', fr'find "{android_path}" -type f -printf "%T@|%p\n"'], stderr=subprocess.STDOUT).decode('utf-8').splitlines()
     except subprocess.CalledProcessError as e:
         output = e.output.decode('utf-8')
         sl.log(f'\x1b[41mFATAL\x1b[0m \x1b[7m[ADB]\x1b[0m {output.strip()}')
@@ -70,77 +86,131 @@ def adb_pull(android_path: str, local_path: str, sl: statuslabel):
 
     n_files = len(android_files)
 
-    for index, android_fpath in enumerate(android_files):
+    if incremental:
+        # find dir with latest date
+        latest_version_dir = None
+        latest_dt = None
+        for d in os.listdir():
+            try:
+                dt = datetime.strptime(d, DATEFORMAT)
+                if (not latest_dt or dt > latest_dt) and d != version_dir:
+                    latest_version_dir = d
+                    latest_dt = dt
+            except ValueError:
+                pass
+        latest_android_files = None
+        if latest_version_dir:
+            latest_afpath = os.path.join(
+                latest_version_dir, os.path.relpath(local_path, version_dir))
+            if os.path.isfile(latest_afpath):
+                with open(latest_afpath, 'rb') as f:
+                    latest_android_files = f.read().decode('utf-8').splitlines()
+                sl.log(f"\x1b[44mINFO\x1b[0m Incremental copy: selected '{latest_version_dir}' as previous version.")
+            else:
+                sl.log(f"\x1b[41mERR\x1b[0m Incremental copy: '.android_files' missing from previous version (selected '{latest_version_dir}'). Full repull needed.")
+        else:
+            sl.log('\x1b[43mWARN\x1b[0m Incremental copy: no previous version found. Full repull needed.')
+
+    os.makedirs(local_path)
+
+    # copy so we can mutate android_files safely
+    for index, android_ffmt in enumerate(android_files.copy()):
+        mtime, android_fpath = android_ffmt.split('|', 1)
         relpath = os.path.relpath(android_fpath, android_path)
 
         # actually rewritable is kind of stupid, we want a static thing
         # and log to insert text above the static thing while pushing it down.
-        # again, horrible at explaining things.
+        # again, horrible at explaining things. (see statuslabel2.py)
         sl.log(f'[{index / n_files * 100:>5.1f}%] {relpath}', rewritable=True)
 
         local_fpath = os.path.join(local_path, relpath)
         local_dirname = os.path.dirname(local_fpath)
         if not os.path.isdir(local_dirname):
             os.makedirs(local_dirname)
-        adb_exitcode = subprocess.call(
-            [ADB_EXE, 'pull', android_fpath, local_fpath], stdout=subprocess.DEVNULL)
-        if adb_exitcode != 0:
-            sl.log(f"'{android_fpath}' could not be pulled.")
+        if incremental and latest_android_files is not None and lookup_mtime(android_fpath, latest_android_files) < float(mtime):
+            # skip pull, copy from previous pull instead
+            shutil.copyfile(os.path.join(latest_version_dir, os.path.relpath(
+                local_fpath, version_dir)), local_fpath)
+        else:
+            if incremental and latest_android_files is not None:
+                # this log message sounds wrong (and is)
+                sl.log(
+                    f"Incremental copy: file '{relpath}' out of date or newly added.")
+
+                # todo: fix having to write the progress again (WIP(fuck i dont wanna) statuslabel2.py)
+                sl.log(f'[{index / n_files * 100:>5.1f}%] {relpath}',
+                       rewritable=True)
+
+            adb_exitcode = subprocess.call(
+                [ADB_EXE, 'pull', android_fpath, local_fpath], stdout=subprocess.DEVNULL)
+            if adb_exitcode != 0:
+                sl.log(
+                    f"\x1b[41mERR\x1b[0m '{android_fpath}' could not be pulled.")
+                android_files.remove(android_ffmt)
+
+    with open(os.path.join(local_path, '.android_files'), 'wb') as f:
+        f.write(os.linesep.join(android_files).encode('utf-8'))
 
     return True
 
 
 # copying between different file systems requires sanitization.
-local_music_dir = sanitize_filename(
-    os.path.basename(ANDROID_MUSIC_DIR), replacement_text='_')
+local_music_dir = os.path.join(version_dir, sanitize_filename(
+    os.path.basename(ANDROID_MUSIC_DIR), replacement_text='_'))
+selected_aa_dir = os.path.join(version_dir, 'selected_aa')
 
-if len(sys.argv) >= 2 and sys.argv[1] == '--skip-copy':
-    if not os.path.isdir(local_music_dir):
-        print(
-            f"\x1b[41mFATAL\x1b[0m Can't skip file copy, '{local_music_dir}' is not a directory.")
-        exit(1)
-    if not os.path.isdir('selected_aa'):
-        print(
-            f"\x1b[41mFATAL\x1b[0m Can't skip file copy, 'selected_aa' is not a directory.")
-        exit(1)
+# if len(sys.argv) >= 2 and sys.argv[1] == '--skip-copy':
+#     if not os.path.isdir(local_music_dir):
+#         print(
+#             f"\x1b[41mFATAL\x1b[0m Can't skip file copy, '{local_music_dir}' is not a directory.")
+#         exit(1)
+#     if not os.path.isdir('selected_aa'):
+#         print(
+#             f"\x1b[41mFATAL\x1b[0m Can't skip file copy, 'selected_aa' is not a directory.")
+#         exit(1)
 
-    print(f'\x1b[44mINFO\x1b[0m Skipping file copy from Android.')
-else:
-    if os.path.exists(local_music_dir):
-        print(
-            f"\x1b[43mWARN\x1b[0m '{local_music_dir}' already exists, aborting.")
-        exit(1)
-    if os.path.exists('selected_aa'):
-        print(f"\x1b[43mWARN\x1b[0m 'selected_aa' already exists, aborting.")
-        exit(1)
+#     print(f'\x1b[44mINFO\x1b[0m Skipping file copy from Android.')
+# else:
+if True:
+    # realistically can't happen because the target folder will be named after the
+    # current date and time.
+    # if os.path.exists(local_music_dir):
+    #     print(
+    #         f"\x1b[43mWARN\x1b[0m '{local_music_dir}' already exists, aborting.")
+    #     exit(1)
+    # if os.path.exists('selected_aa'):
+    #     print(f"\x1b[43mWARN\x1b[0m 'selected_aa' already exists, aborting.")
+    #     exit(1)
+
+    incremental = '--incremental' in sys.argv
 
     with statuslabel(f"Copying '{ANDROID_MUSIC_DIR}' from Android to '{local_music_dir}'...") as sl:
         sl.status('WORKING', bg=tclr.CYAN)
-        if not adb_pull(ANDROID_MUSIC_DIR, local_music_dir, sl):
+        if not adb_pull(ANDROID_MUSIC_DIR, local_music_dir, sl, incremental):
             sl.status('FAILED', bg=tclr.RED)
             exit(-1)
         sl.status('DONE', bg=tclr.GREEN)
 
     with statuslabel(f"Copying '{ANDROID_SELECTED_AA_DIR}' from Android to 'selected_aa'...") as sl:
         sl.status('WORKING', bg=tclr.CYAN)
-        if not adb_pull(ANDROID_SELECTED_AA_DIR, 'selected_aa', sl):
+        if not adb_pull(ANDROID_SELECTED_AA_DIR, selected_aa_dir, sl, incremental):
             sl.status('FAILED', bg=tclr.RED)
             exit(-1)
         sl.status('DONE', bg=tclr.GREEN)
 
 
-def flat_filelist(root: str):
+def flat_filelist(root: str) -> list[str]:
     return [os.path.join(dirpath, fname)
             for dirpath, _, fnames in os.walk(root)
             for fname in fnames]
 
 
-def sanitize_songfname(fname: str):
+def sanitize_songfname(fname: str) -> str:
     # \w also matches unicode letters
     return re.sub(r'[^\w \-$@!=.,]', '_', fname)
 
 
-def selectedaafname(track, fpath: str, sl: statuslabel):
+def selectedaafname(track, fpath: str, sl: statuslabel) -> str:
     title = str(track['title']).strip()
     artist = str(track['artist']).strip()
     album = str(track['album']).strip()
@@ -188,7 +258,7 @@ with statuslabel(f'Embedding cover art into song files...') as sl:
         aa_fname = selectedaafname(track, fpath, sl)
         if not aa_fname:
             continue
-        aa_fpath = os.path.join('selected_aa', aa_fname)
+        aa_fpath = os.path.join(selected_aa_dir, aa_fname)
         if os.path.isfile(aa_fpath):
             noerr = False
             try:
