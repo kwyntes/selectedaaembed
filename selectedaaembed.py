@@ -101,7 +101,7 @@ def adb_pull(android_path: str, local_path: str, sl: statuslabel, incremental: b
         latest_android_files = None
         if latest_version_dir:
             latest_afpath = os.path.join(
-                latest_version_dir, os.path.relpath(local_path, version_dir))
+                latest_version_dir, os.path.relpath(local_path, version_dir), '.android_files')
             if os.path.isfile(latest_afpath):
                 with open(latest_afpath, 'rb') as f:
                     latest_android_files = f.read().decode('utf-8').splitlines()
@@ -127,7 +127,8 @@ def adb_pull(android_path: str, local_path: str, sl: statuslabel, incremental: b
         local_dirname = os.path.dirname(local_fpath)
         if not os.path.isdir(local_dirname):
             os.makedirs(local_dirname)
-        if incremental and latest_android_files is not None and lookup_mtime(android_fpath, latest_android_files) < float(mtime):
+        # it shouldn't ever be greater than mtime, but uh, you know, just in case.
+        if incremental and latest_android_files is not None and lookup_mtime(android_fpath, latest_android_files) >= float(mtime):
             # skip pull, copy from previous pull instead
             shutil.copyfile(os.path.join(latest_version_dir, os.path.relpath(
                 local_fpath, version_dir)), local_fpath)
