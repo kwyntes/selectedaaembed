@@ -17,14 +17,13 @@ import shutil
 import subprocess
 import sys
 import time
-
 # todo: automatically copy files to a backup folder with a timestamp name
 # i am so bad at explaining things holy shit
 from datetime import datetime
 from pathlib import Path
 
-from pathvalidate import sanitize_filename
 import music_tag
+from pathvalidate import sanitize_filename
 
 from statuslabel import statuslabel, tclr
 
@@ -105,11 +104,14 @@ def adb_pull(android_path: str, local_path: str, sl: statuslabel, incremental: b
             if os.path.isfile(latest_afpath):
                 with open(latest_afpath, 'rb') as f:
                     latest_android_files = f.read().decode('utf-8').splitlines()
-                sl.log(f"\x1b[44mINFO\x1b[0m Incremental copy: selected '{latest_version_dir}' as previous version.")
+                sl.log(
+                    f"\x1b[44mINFO\x1b[0m Incremental copy: selected '{latest_version_dir}' as previous version.")
             else:
-                sl.log(f"\x1b[41mERR\x1b[0m Incremental copy: '.android_files' missing from previous version (selected '{latest_version_dir}'). Full repull needed.")
+                sl.log(
+                    f"\x1b[41mERR\x1b[0m Incremental copy: '.android_files' missing from previous version (selected '{latest_version_dir}'). Full repull needed.")
         else:
-            sl.log('\x1b[43mWARN\x1b[0m Incremental copy: no previous version found. Full repull needed.')
+            sl.log(
+                '\x1b[43mWARN\x1b[0m Incremental copy: no previous version found. Full repull needed.')
 
     os.makedirs(local_path)
 
@@ -267,8 +269,18 @@ with statuslabel(f'Embedding cover art into song files...') as sl:
                     track['artwork'] = imgf.read()
                 noerr = True
             except OSError as e:
-                sl.log(
-                    f"\x1b[41mERR\x1b[0m Error embedding '{aa_fname}' into '{fpath}': {e.args[1] if len(e.args) > 1 else e.args[0]}")
+                # it looks like poweramp truncates album art jpgs if they
+                # have been manually deselected in the app,  which will raise an
+                # error here because the jpg is 0 bytes.
+                # we should probably just detect that the file is 0 bytes and
+                # remove it here.
+                if os.path.getsize(aa_fpath) == 0:
+                    sl.log(
+                        f"\x1b[43mWARN\x1b[0m '{aa_fname}' failed to embed because it is 0 bytes long. Assuming this is caused by manual deselection of the file through Poweramp itself and deleting the file.")
+                    os.remove(aa_fpath)
+                else:
+                    sl.log(
+                        f"\x1b[41mERR\x1b[0m Error embedding '{aa_fname}' into '{fpath}': {e.args[1] if len(e.args) > 1 else e.args[0]}")
             except TypeError as e:
                 sl.log(
                     f"\x1b[41mERR\x1b[0m Error embedding '{aa_fname}': {e.args[0]}")
